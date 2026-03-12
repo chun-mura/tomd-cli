@@ -1,0 +1,35 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(pip3 show markitdown)",
+      "Bash(pip3 install markitdown)",
+      "Bash(pip3 install markitdown --break-system-packages)",
+      "Read(//usr/local/bin/**)",
+      "Bash(ln -sf /Users/nakamurakohki/workspace/private_dev/convert-md/convert_md.py /usr/local/bin/convert-md)",
+      "Bash(convert-md --help)",
+      "Bash(ln -sf /Users/nakamurakohki/workspace/private_dev/convert-md/convert_md.py /usr/local/bin/tomd)",
+      "Bash(tomd --help)",
+      "Bash(ln -sf /Users/nakamurakohki/workspace/private_dev/convert-md/tomd.py /usr/local/bin/tomd)",
+      "Bash(sudo ln -sf /Users/nakamurakohki/workspace/private_dev/tomd/tomd.py /usr/local/bin/tomd)",
+      "Bash(python3 /Users/nakamurakohki/workspace/private_dev/tomd/tomd.py \"バックオフィス業務システム化_提案資料.docx\" -o /tmp/test_output.md)",
+      "Read(//tmp/**)",
+      "Bash(python3 /Users/nakamurakohki/workspace/private_dev/tomd/tomd.py \"/Users/nakamurakohki/Downloads/バックオフィス業務システム化_提案資料.docx\" -o /tmp/test_output2.md)",
+      "Bash(pip3 index:*)",
+      "Bash(pip3 install:*)",
+      "Bash(for name:*)",
+      "Bash(do echo:*)",
+      "WebFetch(domain:pypi.org)",
+      "Bash(python3 -m pytest tests/ -v)",
+      "Read(//Users/nakamurakohki/**)",
+      "Bash(python3 -m build)",
+      "Bash(twine check:*)",
+      "Bash(pip3.14 show:*)",
+      "Bash(pip3 show:*)",
+      "Bash(python3.14 -m pip show tomd)",
+      "Bash(python3.14 -m pip list)"
+    ],
+    "additionalDirectories": [
+      "/Users/nakamurakohki/workspace/private_dev/tomd/src"
+    ]
+  }
+}
