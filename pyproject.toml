@@ -35,9 +35,9 @@ dependencies = [
 tomd = "tomd.cli:main"
 
 [project.urls]
-Homepage = "https://github.com/nakamurakohki/tomd-cli"
-Repository = "https://github.com/nakamurakohki/tomd-cli"
-Issues = "https://github.com/nakamurakohki/tomd-cli/issues"
+Homepage = "https://github.com/chun-mura/tomd-cli"
+Repository = "https://github.com/chun-mura/tomd-cli"
+Issues = "https://github.com/chun-mura/tomd-cli/issues"
 PyPI = "https://pypi.org/project/tomd-cli/"
 
 [tool.hatch.build.targets.wheel]
