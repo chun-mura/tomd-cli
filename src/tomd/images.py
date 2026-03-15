@@ -42,13 +42,17 @@ def _extract_images(src: Path, dest: Path) -> dict[str, str]:
                 if not entry.startswith(prefix):
                     continue
                 filename = Path(entry).name
+                if not filename or ".." in filename or "/" in filename:
+                    continue
                 if not filename.lower().endswith(
                     (".png", ".jpg", ".jpeg", ".gif", ".bmp", ".tiff", ".svg", ".emf", ".wmf"),
                 ):
                     continue
                 images_dir.mkdir(parents=True, exist_ok=True)
                 out_name = f"{src.stem}_{filename}"
-                out_path = images_dir / out_name
+                out_path = (images_dir / out_name).resolve()
+                if not out_path.parent == images_dir.resolve():
+                    continue
                 out_path.write_bytes(zf.read(entry))
                 rel_path = f"images/{out_name}"
                 image_map[filename] = rel_path
