@@ -22,5 +22,8 @@ htmlcov/
 .vscode/
 .idea/
 
+# Claude
+.claude/settings.local.json
+
 # OS
 .DS_Store
