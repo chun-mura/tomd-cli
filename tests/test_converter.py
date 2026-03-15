@@ -8,6 +8,10 @@ from tomd.converter import (
     _table_to_markdown,
     _tables_have_same_header,
     _merge_continuation_row,
+    _collect_table_cell_texts,
+    _find_table_region,
+    _strip_page_headers,
+    _apply_headings,
 )
 
 
@@ -156,3 +160,92 @@ class TestMergeContinuationRow:
         cont = ["new", None]
         result = _merge_continuation_row(last, cont)
         assert result == ["new", "existing"]
+
+
+class TestCollectTableCellTexts:
+    def test_collects_cell_lines(self):
+        tables = [[["Header A", "Header B"], ["cell\nwith newline", "short"]]]
+        result = _collect_table_cell_texts(tables)
+        assert "Header A" in result
+        assert "cell" in result
+        assert "with newline" in result
+        assert "short" in result
+
+    def test_skips_empty_cells(self):
+        tables = [[[None, ""], ["text", None]]]
+        result = _collect_table_cell_texts(tables)
+        assert "text" in result
+        assert "" not in result
+
+    def test_replaces_null_bytes(self):
+        tables = [[["GPT\x004o", "other"]]]
+        result = _collect_table_cell_texts(tables)
+        assert "GPT-4o" in result
+
+
+class TestFindTableRegion:
+    def test_finds_region(self):
+        lines = [
+            "Title",
+            "",
+            "Header A",
+            "cell data",
+            "more cell",
+            "",
+            "After table text",
+        ]
+        cell_texts = {"Header A", "cell data", "more cell"}
+        start, end = _find_table_region(lines, cell_texts)
+        assert start == 2
+        assert end == 4
+
+    def test_no_match(self):
+        lines = ["Title", "No table here"]
+        cell_texts = {"something else entirely"}
+        start, end = _find_table_region(lines, cell_texts)
+        assert start is None
+        assert end is None
+
+
+class TestStripPageHeaders:
+    def test_removes_repeated_lines(self):
+        text = "Header\nContent A\nHeader\nContent B\nHeader"
+        result = _strip_page_headers(text)
+        assert "Header" not in result
+        assert "Content A" in result
+
+    def test_removes_page_numbers(self):
+        text = "Line 1\nLine 2\nLine 3\nLine 4\nAIモデル精度チューニング観点2"
+        result = _strip_page_headers(text)
+        assert "AIモデル精度チューニング観点2" not in result
+
+    def test_cleans_header_prefix(self):
+        text = "Line 1\nLine 2\nLine 3\nLine 4\nAIモデル精度チューニング観点2max_tokens（最大出力量）"
+        result = _strip_page_headers(text)
+        assert "max_tokens（最大出力量）" in result
+
+    def test_preserves_short_text(self):
+        text = "Short"
+        result = _strip_page_headers(text)
+        assert result == "Short"
+
+
+class TestApplyHeadings:
+    def test_applies_h1_and_h2(self):
+        heading_map = {"Title": 1, "Section": 2}
+        text = "Title\n\nSection\n\nBody text"
+        result = _apply_headings(text, heading_map)
+        assert "# Title" in result
+        assert "## Section" in result
+        assert "Body text" in result
+
+    def test_no_headings(self):
+        text = "Just body text"
+        result = _apply_headings(text, {})
+        assert result == text
+
+    def test_does_not_affect_non_matching_lines(self):
+        heading_map = {"Title": 1}
+        text = "Title\nNot a heading\nMore text"
+        result = _apply_headings(text, heading_map)
+        assert result == "# Title\nNot a heading\nMore text"

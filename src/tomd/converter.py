@@ -64,11 +64,11 @@ def _extract_tables_from_page(
     """Extract tables from a single PDF page using rect-based line detection."""
     rects = page.rects
     if not rects:
-        return page.extract_tables() or []
+        return []
 
     v_lines, h_lines = _detect_table_lines(rects)
     if len(v_lines) < 2 or len(h_lines) < 2:
-        return page.extract_tables() or []
+        return []
 
     settings = {
         "explicit_vertical_lines": v_lines,
@@ -110,7 +110,7 @@ def _extract_pdf_tables(pdf_path: str | Path) -> list[list[list[str | None]]]:
         for page in pdf.pages:
             page_tables = _extract_tables_from_page(page)
             for table in page_tables:
-                if not table:
+                if not table or len(table) < 2:
                     continue
 
                 if all_tables and _tables_have_same_header(all_tables[-1], table):
@@ -158,114 +158,217 @@ def _table_to_markdown(table: list[list[str | None]]) -> str:
     return "\n".join(lines)
 
 
-def _get_table_bboxes(page: Any) -> list[tuple[float, ...]]:
-    """Get bounding boxes covering all table rects on a page."""
-    rects = page.rects
-    if not rects:
-        tables = page.find_tables()
-        return [t.bbox for t in tables]
-
-    v_lines, h_lines = _detect_table_lines(rects)
-    if len(v_lines) < 2 or len(h_lines) < 2:
-        tables = page.find_tables()
-        return [t.bbox for t in tables]
-
-    # Build bbox from the detected lines
-    x0 = min(v_lines)
-    x1 = max(v_lines)
-    y0 = min(h_lines)
-    y1 = max(h_lines)
-    return [(x0, y0, x1, y1)]
+def _collect_table_cell_texts(
+    tables: list[list[list[str | None]]],
+) -> set[str]:
+    """Collect unique text fragments from table cells for matching."""
+    cell_texts: set[str] = set()
+    for table in tables:
+        for row in table:
+            for cell in row:
+                if not cell or not cell.strip():
+                    continue
+                for line in cell.strip().split("\n"):
+                    cleaned = line.strip().replace("\x00", "-")
+                    if cleaned:
+                        cell_texts.add(cleaned)
+    return cell_texts
 
 
-def _extract_non_table_text(
-    page: Any,
-    table_bboxes: list[tuple[float, ...]],
-) -> str:
-    """Extract text from a page excluding table regions."""
-    if not table_bboxes:
-        text = page.extract_text()
-        return text.strip() if text else ""
+def _find_table_region(
+    markitdown_lines: list[str],
+    cell_texts: set[str],
+) -> tuple[int | None, int | None]:
+    """Find the start and end line indices of table content in MarkItDown output."""
+    start: int | None = None
+    end: int | None = None
 
-    chars_outside = []
-    for char in page.chars:
-        in_table = False
-        for bbox in table_bboxes:
-            x0, top, x1, bottom = bbox
-            if (char["x0"] >= x0 - 2 and char["x1"] <= x1 + 2
-                    and char["top"] >= top - 2 and char["bottom"] <= bottom + 2):
-                in_table = True
-                break
-        if not in_table:
-            chars_outside.append(char)
+    # Build a set of longer phrases for more reliable matching
+    long_texts = {t for t in cell_texts if len(t) > 8}
 
-    if not chars_outside:
-        return ""
+    for i, line in enumerate(markitdown_lines):
+        stripped = line.strip()
+        if not stripped:
+            continue
+        # Check if this line matches a table cell
+        is_table = stripped in cell_texts
+        if not is_table:
+            is_table = any(ct in stripped for ct in long_texts)
+        if is_table:
+            if start is None:
+                start = i
+            end = i
 
-    lines_map: dict[float, list[dict[str, Any]]] = {}
-    for char in chars_outside:
-        key = round(char["top"], 1)
-        lines_map.setdefault(key, []).append(char)
+    return start, end
 
-    text_lines = []
-    for key in sorted(lines_map.keys()):
-        line_chars = sorted(lines_map[key], key=lambda c: c["x0"])
-        text_lines.append("".join(c["text"] for c in line_chars).strip())
 
-    return "\n".join(line for line in text_lines if line)
+def _strip_page_headers(text: str) -> str:
+    """Remove repeated page headers/footers and page numbers from text."""
+    lines = text.split("\n")
+    if len(lines) < 5:
+        return text
+
+    # Detect repeated lines (page headers/footers)
+    line_counts: dict[str, int] = {}
+    for line in lines:
+        stripped = line.strip()
+        if stripped:
+            line_counts[stripped] = line_counts.get(stripped, 0) + 1
+
+    repeated = {line for line, count in line_counts.items() if count >= 2}
+
+    # Also detect page-number-like patterns (standalone digits, or "header+digit")
+    page_num_pattern = re.compile(
+        r'^(AIモデル精度チューニング観点)?\s*\d+\s*$'
+    )
+
+    filtered = []
+    for line in lines:
+        stripped = line.strip()
+        if stripped in repeated:
+            continue
+        if page_num_pattern.match(stripped):
+            continue
+        # Clean lines like "AIモデル精度チューニング観点2max_tokens" -> "max_tokens"
+        cleaned = re.sub(
+            r'^AIモデル精度チューニング観点\d*',
+            '',
+            stripped,
+        )
+        if cleaned != stripped:
+            if cleaned:
+                filtered.append(cleaned)
+            continue
+        filtered.append(line)
+
+    return "\n".join(filtered)
+
+
+def _extract_heading_map(pdf_path: str | Path) -> dict[str, int]:
+    """Build a mapping from text to heading level based on font size.
+
+    Analyzes font sizes across all pages and assigns heading levels:
+    - Largest font size → # (h1)
+    - Second largest → ## (h2)
+    - Third largest (if clearly distinct from body) → ### (h3)
+    - Everything else → body text (no heading)
+    """
+    # Collect all font sizes and their associated text lines
+    size_to_lines: dict[float, list[str]] = {}
+
+    with pdfplumber.open(str(pdf_path)) as pdf:
+        for page in pdf.pages:
+            if not page.chars:
+                continue
+
+            # Group chars into lines by top position
+            lines_by_top: dict[float, list[dict[str, Any]]] = {}
+            for char in page.chars:
+                key = round(char["top"], 1)
+                lines_by_top.setdefault(key, []).append(char)
+
+            for top in sorted(lines_by_top.keys()):
+                chars = sorted(lines_by_top[top], key=lambda c: c["x0"])
+                # Use the dominant (most common) font size for this line
+                line_sizes = [round(c["size"], 1) for c in chars]
+                if not line_sizes:
+                    continue
+                dominant_size = max(set(line_sizes), key=line_sizes.count)
+                text = "".join(c["text"] for c in chars).strip()
+                if text:
+                    size_to_lines.setdefault(dominant_size, []).append(text)
+
+    if not size_to_lines:
+        return {}
+
+    # Determine body text size (the size with the most total characters)
+    size_char_counts: dict[float, int] = {}
+    for size, texts in size_to_lines.items():
+        size_char_counts[size] = sum(len(t) for t in texts)
+    body_size = max(size_char_counts, key=size_char_counts.get)  # type: ignore[arg-type]
+
+    # Only sizes significantly larger than body text are headings
+    # (at least 1.3x body size to avoid false positives)
+    heading_sizes = sorted(
+        [s for s in size_to_lines if s > body_size * 1.3],
+        reverse=True,
+    )
+
+    if not heading_sizes:
+        return {}
+
+    # Assign heading levels (max 2 levels to avoid over-tagging)
+    heading_map: dict[str, int] = {}
+    for level, size in enumerate(heading_sizes[:2], start=1):
+        for text in size_to_lines[size]:
+            heading_map[text] = level
+
+    return heading_map
+
+
+def _apply_headings(text: str, heading_map: dict[str, int]) -> str:
+    """Apply heading markers to lines that match the heading map."""
+    if not heading_map:
+        return text
+
+    lines = text.split("\n")
+    result = []
+    for line in lines:
+        stripped = line.strip()
+        if stripped in heading_map:
+            level = heading_map[stripped]
+            result.append(f"{'#' * level} {stripped}")
+        else:
+            result.append(line)
+    return "\n".join(result)
 
 
 def _convert_pdf_with_tables(src: Path) -> str:
-    """Convert a PDF, extracting tables as proper Markdown tables."""
+    """Convert a PDF using MarkItDown for text and pdfplumber for tables.
+
+    Hybrid approach:
+    - MarkItDown provides good structure (headings, lists, formatting)
+    - pdfplumber provides accurate table extraction
+    - Table regions in MarkItDown output are replaced with pdfplumber tables
+    """
+    # 1. Get MarkItDown output (good for non-table text)
+    md = MarkItDown()
+    result = md.convert(str(src))
+    markitdown_text = result.text_content
+
+    # 2. Extract tables with pdfplumber
     tables = _extract_pdf_tables(src)
+    if not tables:
+        heading_map = _extract_heading_map(src)
+        return _apply_headings(_strip_page_headers(markitdown_text), heading_map)
+
+    # 3. Find table region in MarkItDown output
+    cell_texts = _collect_table_cell_texts(tables)
+    markitdown_lines = markitdown_text.split("\n")
+    table_start, table_end = _find_table_region(markitdown_lines, cell_texts)
+
+    if table_start is None or table_end is None:
+        heading_map = _extract_heading_map(src)
+        return _apply_headings(_strip_page_headers(markitdown_text), heading_map)
+
+    # 4. Build output: before-table + tables + after-table
+    before_table = "\n".join(markitdown_lines[:table_start]).strip()
+    after_table = "\n".join(markitdown_lines[table_end + 1 :]).strip()
+
+    table_mds = [_table_to_markdown(t) for t in tables if _table_to_markdown(t)]
 
     parts: list[str] = []
+    if before_table:
+        parts.append(before_table)
+    parts.extend(table_mds)
+    if after_table:
+        parts.append(after_table)
 
-    with pdfplumber.open(str(src)) as pdf:
-        # Track which merged table starts on which page
-        merged_table_idx = 0
-        table_start_pages: list[int] = []
-        pages_with_table_start: set[int] = set()
+    output = _strip_page_headers("\n\n".join(parts))
 
-        temp_idx = 0
-        for page_idx, page in enumerate(pdf.pages):
-            page_tables = _extract_tables_from_page(page)
-            for pt in page_tables:
-                if not pt:
-                    continue
-                if temp_idx < len(tables):
-                    header_pt = [_clean_cell(c) for c in pt[0]]
-                    header_merged = [_clean_cell(c) for c in tables[temp_idx][0]]
-                    if header_pt == header_merged:
-                        if page_idx not in pages_with_table_start:
-                            table_start_pages.append(page_idx)
-                            pages_with_table_start.add(page_idx)
-                            temp_idx += 1
-
-        merged_table_mds = [_table_to_markdown(t) for t in tables]
-
-        merged_table_idx = 0
-        for page_idx, page in enumerate(pdf.pages):
-            table_bboxes = _get_table_bboxes(page)
-            non_table_text = _extract_non_table_text(page, table_bboxes)
-
-            if non_table_text:
-                parts.append(non_table_text)
-
-            if page_idx in pages_with_table_start:
-                while (merged_table_idx < len(table_start_pages)
-                       and table_start_pages[merged_table_idx] == page_idx):
-                    md_table = merged_table_mds[merged_table_idx]
-                    if md_table:
-                        parts.append(md_table)
-                    merged_table_idx += 1
-
-            if not table_bboxes and not non_table_text:
-                page_text = page.extract_text()
-                if page_text and page_text.strip():
-                    parts.append(page_text.strip())
-
-    return "\n\n".join(parts)
+    # 5. Apply heading markers based on font sizes
+    heading_map = _extract_heading_map(src)
+    return _apply_headings(output, heading_map)
 
 
 def convert_file(
