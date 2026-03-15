@@ -2,12 +2,16 @@
 
 from __future__ import annotations
 
+import logging
 import re
 from typing import Any
 from pathlib import Path
 
 import pdfplumber
 from markitdown import MarkItDown
+
+# Suppress noisy pdfminer warnings (e.g. "Could not get FontBBox")
+logging.getLogger("pdfminer").setLevel(logging.ERROR)
 
 SUPPORTED_EXTENSIONS = {".pptx", ".docx", ".xlsx", ".pdf"}
 
