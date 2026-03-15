@@ -19,6 +19,16 @@ pipx install tomd-cli
 pip install tomd-cli
 ```
 
+### Update
+
+```bash
+# pipx
+pipx upgrade tomd-cli
+
+# or pip
+pip install --upgrade tomd-cli
+```
+
 ## Usage
 
 ### CLI
