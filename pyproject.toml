@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "tomd-cli"
-version = "0.1.4"
+version = "0.1.5"
 description = "Convert Office files (.docx, .pptx, .xlsx, .pdf) to Markdown using MarkItDown"
 readme = "README.md"
 license = "MIT"
