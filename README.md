@@ -2,7 +2,7 @@
 
 [![PyPI](https://img.shields.io/pypi/v/tomd-cli)](https://pypi.org/project/tomd-cli/)
 
-Convert Office files to Markdown using [MarkItDown](https://github.com/microsoft/markitdown).
+Convert Office/PDF files to Markdown.
 
 ## Supported formats
 
