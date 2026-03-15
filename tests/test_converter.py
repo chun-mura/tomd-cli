@@ -216,12 +216,13 @@ class TestStripPageHeaders:
         assert "Content A" in result
 
     def test_removes_page_numbers(self):
-        text = "Line 1\nLine 2\nLine 3\nLine 4\nAIモデル精度チューニング観点2"
+        # Header text must appear 3+ times to be detected as a page header
+        text = "MyHeader\nLine 1\nMyHeader\nLine 2\nMyHeader\nLine 3\nLine 4\nMyHeader2"
         result = _strip_page_headers(text)
-        assert "AIモデル精度チューニング観点2" not in result
+        assert "MyHeader2" not in result
 
     def test_cleans_header_prefix(self):
-        text = "Line 1\nLine 2\nLine 3\nLine 4\nAIモデル精度チューニング観点2max_tokens（最大出力量）"
+        text = "MyHeader\nLine 1\nMyHeader\nLine 2\nMyHeader\nLine 3\nLine 4\nMyHeader2max_tokens（最大出力量）"
         result = _strip_page_headers(text)
         assert "max_tokens（最大出力量）" in result
 
