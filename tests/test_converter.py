@@ -1,8 +1,7 @@
-"""Tests for tomd.converter."""
+"""Tests for tomd conversion logic."""
 
 import pytest
-from tomd.converter import (
-    strip_base64_images,
+from tomd.pdf import (
     _clean_cell,
     _detect_table_lines,
     _table_to_markdown,
@@ -13,8 +12,13 @@ from tomd.converter import (
     _strip_page_headers,
     _apply_headings,
     _apply_bullets,
+)
+from tomd.images import (
+    strip_base64_images,
     _extract_images,
     _replace_image_placeholders,
+)
+from tomd.office import (
     _correct_docx_headings,
     _restore_pptx_hyperlinks,
     _add_pptx_slide_separators,
