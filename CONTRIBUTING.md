@@ -20,14 +20,15 @@ pytest
 2. Build the distribution
 
    ```bash
-   python -m build
+   python3 -m build
    ```
 
 3. Local verification (install into a temporary venv and test)
 
    ```bash
+   VERSION=<version>
    python3 -m venv /tmp/tomd-test-env
-   /tmp/tomd-test-env/bin/pip install dist/tomd_cli-<version>-py3-none-any.whl
+   /tmp/tomd-test-env/bin/pip install dist/tomd_cli-${VERSION}-py3-none-any.whl
 
    # Verify CLI works
    /tmp/tomd-test-env/bin/tomd --help
