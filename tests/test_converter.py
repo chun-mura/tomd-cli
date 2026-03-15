@@ -13,6 +13,9 @@ from tomd.converter import (
     _strip_page_headers,
     _apply_headings,
     _apply_bullets,
+    _extract_images,
+    _replace_image_placeholders,
+    _correct_docx_headings,
 )
 
 
@@ -286,4 +289,146 @@ class TestApplyBullets:
     def test_no_items(self):
         text = "Just text"
         result = _apply_bullets(text, set())
+        assert result == text
+
+
+class TestReplaceImagePlaceholders:
+    def test_replaces_empty_parens(self):
+        image_map = {"image1.png": "images/doc_image1.png"}
+        text = "Some text\n![alt]()\nMore text"
+        result = _replace_image_placeholders(text, image_map)
+        assert "![alt](images/doc_image1.png)" in result
+
+    def test_replaces_multiple(self):
+        image_map = {
+            "image1.png": "images/doc_image1.png",
+            "image2.jpg": "images/doc_image2.jpg",
+        }
+        text = "![first]()\n![second]()"
+        result = _replace_image_placeholders(text, image_map)
+        assert "![first](images/doc_image1.png)" in result
+        assert "![second](images/doc_image2.jpg)" in result
+
+    def test_no_images(self):
+        text = "No images here"
+        result = _replace_image_placeholders(text, {})
+        assert result == text
+
+    def test_skips_emf_wmf(self):
+        image_map = {"image1.emf": "images/doc_image1.emf"}
+        text = "![]()"
+        result = _replace_image_placeholders(text, image_map)
+        # EMF/WMF are skipped, so placeholder stays
+        assert result == "![]()"
+
+    def test_preserves_non_empty_refs(self):
+        image_map = {"image1.png": "images/doc_image1.png"}
+        text = "![alt](https://example.com/img.png)"
+        result = _replace_image_placeholders(text, image_map)
+        assert result == text
+
+    def test_stops_when_images_exhausted(self):
+        image_map = {"image1.png": "images/doc_image1.png"}
+        text = "![a]()\n![b]()\n![c]()"
+        result = _replace_image_placeholders(text, image_map)
+        assert "![a](images/doc_image1.png)" in result
+        # Remaining placeholders stay unchanged
+        assert "![b]()" in result
+        assert "![c]()" in result
+
+    def test_replaces_pptx_style_refs(self):
+        image_map = {"image1.png": "images/slides_image1.png"}
+        text = "![slide_img.png](Picture3.jpg)"
+        result = _replace_image_placeholders(text, image_map)
+        assert "![slide_img.png](images/slides_image1.png)" in result
+
+    def test_preserves_urls_in_pptx_mode(self):
+        image_map = {"image1.png": "images/doc_image1.png"}
+        text = "![]()\n![alt](https://example.com/img.png)"
+        result = _replace_image_placeholders(text, image_map)
+        assert "![](images/doc_image1.png)" in result
+        assert "![alt](https://example.com/img.png)" in result
+
+
+class TestExtractImages:
+    def test_non_docx_pptx_returns_empty(self, tmp_path):
+        pdf = tmp_path / "test.pdf"
+        pdf.write_bytes(b"fake pdf")
+        dest = tmp_path / "test.md"
+        assert _extract_images(pdf, dest) == {}
+
+    def test_bad_zip_returns_empty(self, tmp_path):
+        docx = tmp_path / "test.docx"
+        docx.write_bytes(b"not a zip file")
+        dest = tmp_path / "test.md"
+        assert _extract_images(docx, dest) == {}
+
+    def test_extracts_from_docx(self, tmp_path):
+        import zipfile
+        docx_path = tmp_path / "test.docx"
+        with zipfile.ZipFile(str(docx_path), "w") as zf:
+            zf.writestr("word/media/image1.png", b"\x89PNG fake image")
+            zf.writestr("word/media/image2.jpg", b"\xff\xd8 fake jpeg")
+            zf.writestr("word/document.xml", b"<doc/>")
+        dest = tmp_path / "output" / "test.md"
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        result = _extract_images(docx_path, dest)
+        assert "image1.png" in result
+        assert "image2.jpg" in result
+        assert (dest.parent / "images" / "test_image1.png").exists()
+        assert (dest.parent / "images" / "test_image2.jpg").exists()
+
+    def test_extracts_from_pptx(self, tmp_path):
+        import zipfile
+        pptx_path = tmp_path / "slides.pptx"
+        with zipfile.ZipFile(str(pptx_path), "w") as zf:
+            zf.writestr("ppt/media/image1.png", b"\x89PNG fake image")
+        dest = tmp_path / "slides.md"
+        result = _extract_images(pptx_path, dest)
+        assert "image1.png" in result
+        assert (dest.parent / "images" / "slides_image1.png").exists()
+
+
+class TestCorrectDocxHeadings:
+    def test_corrects_heading_levels(self, tmp_path):
+        from docx import Document
+        docx_path = tmp_path / "test.docx"
+        doc = Document()
+        doc.add_heading("Main Title", level=1)
+        doc.add_paragraph("Some body text.")
+        doc.add_heading("Sub Section", level=2)
+        doc.add_paragraph("More body text.")
+        doc.add_heading("Deep Section", level=3)
+        doc.save(str(docx_path))
+
+        # Simulate MarkItDown output with wrong heading levels
+        text = "## Main Title\n\nSome body text.\n\n### Sub Section\n\nMore body text.\n\n#### Deep Section"
+        result = _correct_docx_headings(docx_path, text)
+        assert "# Main Title" in result
+        assert "## Sub Section" in result
+        assert "### Deep Section" in result
+
+    def test_adds_missing_headings(self, tmp_path):
+        from docx import Document
+        docx_path = tmp_path / "test.docx"
+        doc = Document()
+        doc.add_heading("Title", level=1)
+        doc.add_paragraph("Body text.")
+        doc.save(str(docx_path))
+
+        # MarkItDown missed the heading entirely
+        text = "Title\n\nBody text."
+        result = _correct_docx_headings(docx_path, text)
+        assert "# Title" in result
+        assert "Body text." in result
+
+    def test_no_headings_in_docx(self, tmp_path):
+        from docx import Document
+        docx_path = tmp_path / "test.docx"
+        doc = Document()
+        doc.add_paragraph("Just a paragraph.")
+        doc.save(str(docx_path))
+
+        text = "Just a paragraph."
+        result = _correct_docx_headings(docx_path, text)
         assert result == text

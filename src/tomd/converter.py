@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 import re
+import zipfile
 from typing import Any
 from pathlib import Path
 
@@ -999,6 +1000,165 @@ def _apply_pdf_formatting(text: str, pdf_path: str | Path) -> str:
     return output
 
 
+def _extract_images(src: Path, dest: Path) -> dict[str, str]:
+    """Extract embedded images from docx/pptx files.
+
+    Saves images to an ``images/`` subdirectory next to *dest* and returns
+    a mapping from the internal relationship path (e.g. ``image1.png``)
+    to the relative Markdown reference path (e.g. ``images/image1.png``).
+    """
+    suffix = src.suffix.lower()
+    if suffix not in (".docx", ".pptx"):
+        return {}
+
+    images_dir = dest.parent / "images"
+    image_map: dict[str, str] = {}
+
+    # Both docx and pptx are ZIP archives with media in known directories
+    media_prefixes = {
+        ".docx": "word/media/",
+        ".pptx": "ppt/media/",
+    }
+    prefix = media_prefixes[suffix]
+
+    try:
+        with zipfile.ZipFile(str(src), "r") as zf:
+            for entry in zf.namelist():
+                if not entry.startswith(prefix):
+                    continue
+                filename = Path(entry).name
+                # Only extract common image formats
+                if not filename.lower().endswith(
+                    (".png", ".jpg", ".jpeg", ".gif", ".bmp", ".tiff", ".svg", ".emf", ".wmf"),
+                ):
+                    continue
+                images_dir.mkdir(parents=True, exist_ok=True)
+                # Avoid name collisions by prefixing with source stem
+                out_name = f"{src.stem}_{filename}"
+                out_path = images_dir / out_name
+                out_path.write_bytes(zf.read(entry))
+                rel_path = f"images/{out_name}"
+                image_map[filename] = rel_path
+    except (zipfile.BadZipFile, OSError):
+        pass
+
+    return image_map
+
+
+def _replace_image_placeholders(
+    text: str, image_map: dict[str, str],
+) -> str:
+    """Replace image references with extracted image paths.
+
+    Handles two patterns produced by MarkItDown:
+    1. Empty parens: ``![alt]()`` — from base64-stripped images (docx)
+    2. Non-path refs: ``![alt](SomeRef.jpg)`` — from pptx slide images
+
+    Extracted images are assigned in order of appearance.
+    """
+    if not image_map:
+        return text
+
+    # Build an ordered list of image paths (sorted by filename for stability)
+    image_paths = [
+        path for _, path in sorted(image_map.items())
+        if not path.lower().endswith((".emf", ".wmf"))
+    ]
+    if not image_paths:
+        return text
+
+    idx = 0
+
+    def _replacer(m: re.Match[str]) -> str:
+        nonlocal idx
+        if idx >= len(image_paths):
+            return m.group(0)
+        alt = m.group(1)
+        path = image_paths[idx]
+        idx += 1
+        return f"![{alt}]({path})"
+
+    # Match ![any alt]() — empty parens (docx after base64 strip)
+    text = re.sub(r'!\[([^\]]*)\]\(\)', _replacer, text)
+
+    # Match ![any alt](non-url-ref) — pptx image refs that are not real paths
+    # (e.g. "Picture3.jpg", "image1.png" without directory separators or URLs)
+    if idx < len(image_paths):
+        def _pptx_replacer(m: re.Match[str]) -> str:
+            nonlocal idx
+            ref = m.group(2)
+            # Skip URLs and already-replaced paths
+            if ref.startswith(("http://", "https://", "images/")):
+                return m.group(0)
+            if idx >= len(image_paths):
+                return m.group(0)
+            alt = m.group(1)
+            path = image_paths[idx]
+            idx += 1
+            return f"![{alt}]({path})"
+
+        text = re.sub(r'!\[([^\]]*)\]\(([^)]+)\)', _pptx_replacer, text)
+
+    return text
+
+
+def _correct_docx_headings(src: Path, text: str) -> str:
+    """Correct heading levels in MarkItDown output using python-docx styles.
+
+    Reads the .docx paragraph styles to build a map of heading text → level,
+    then ensures the Markdown output uses the correct heading markers.
+    """
+    try:
+        from docx import Document  # type: ignore[import-untyped]
+    except ImportError:
+        return text
+
+    doc = Document(str(src))
+
+    # Build heading map from docx paragraph styles
+    heading_map: dict[str, int] = {}
+    for para in doc.paragraphs:
+        style_name = para.style.name if para.style else ""
+        if not style_name.startswith("Heading"):
+            continue
+        # Extract level from style name: "Heading 1" → 1, "Heading 2" → 2
+        parts = style_name.split()
+        if len(parts) >= 2 and parts[-1].isdigit():
+            level = int(parts[-1])
+            para_text = para.text.strip()
+            if para_text:
+                heading_map[para_text] = level
+
+    if not heading_map:
+        return text
+
+    lines = text.split("\n")
+    result = []
+    for line in lines:
+        stripped = line.strip()
+        if not stripped:
+            result.append(line)
+            continue
+
+        # Check if this line is already a heading (possibly wrong level)
+        existing_match = re.match(r'^(#{1,6})\s+(.+)$', stripped)
+        if existing_match:
+            heading_text = existing_match.group(2).strip()
+            if heading_text in heading_map:
+                level = heading_map[heading_text]
+                result.append(f"{'#' * level} {heading_text}")
+                continue
+
+        # Check if this plain line should be a heading
+        if stripped in heading_map:
+            level = heading_map[stripped]
+            result.append(f"{'#' * level} {stripped}")
+            continue
+
+        result.append(line)
+    return "\n".join(result)
+
+
 def convert_file(
     input_path: str | Path,
     output_path: str | Path | None = None,
@@ -1014,6 +1174,8 @@ def convert_file(
 
     dest = Path(output_path).resolve() if output_path else src.with_suffix(".md")
 
+    dest.parent.mkdir(parents=True, exist_ok=True)
+
     if src.suffix.lower() == ".pdf":
         content = _convert_pdf_with_tables(src)
     else:
@@ -1021,9 +1183,18 @@ def convert_file(
         result = md.convert(str(src))
         content = result.text_content
 
-    content = strip_base64_images(content)
+        # Docx heading style correction
+        if src.suffix.lower() == ".docx":
+            content = _correct_docx_headings(src, content)
 
-    dest.parent.mkdir(parents=True, exist_ok=True)
+        # Strip base64 images first, then replace placeholders with extracted files
+        content = strip_base64_images(content)
+        image_map = _extract_images(src, dest)
+        content = _replace_image_placeholders(content, image_map)
+
+    if src.suffix.lower() == ".pdf":
+        content = strip_base64_images(content)
+
     dest.write_text(content, encoding="utf-8")
     return dest
 
@@ -1059,7 +1230,19 @@ def convert_dir(
             md = MarkItDown()
             result = md.convert(str(f))
             text = result.text_content
-        dest.write_text(strip_base64_images(text), encoding="utf-8")
+
+            # Docx heading style correction
+            if f.suffix.lower() == ".docx":
+                text = _correct_docx_headings(f, text)
+
+            # Strip base64 images first, then replace with extracted files
+            text = strip_base64_images(text)
+            image_map = _extract_images(f, dest)
+            text = _replace_image_placeholders(text, image_map)
+
+        if f.suffix.lower() == ".pdf":
+            text = strip_base64_images(text)
+        dest.write_text(text, encoding="utf-8")
         results.append(dest)
 
     return results
