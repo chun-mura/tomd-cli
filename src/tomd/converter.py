@@ -56,10 +56,12 @@ def _detect_table_lines(
         # Thin horizontal rects are row borders
         if h < 2 and w > 10:
             h_lines.add(round((r["top"] + r["bottom"]) / 2, 1))
-        # Cell rects — use top/bottom as horizontal lines
+        # Cell rects — use edges as both horizontal and vertical lines
         if w > 50 and h > 20:
             h_lines.add(round(r["top"], 1))
             h_lines.add(round(r["bottom"], 1))
+            v_lines.add(round(r["x0"], 1))
+            v_lines.add(round(r["x1"], 1))
 
     return sorted(v_lines), sorted(h_lines)
 
@@ -1000,6 +1002,180 @@ def _apply_pdf_formatting(text: str, pdf_path: str | Path) -> str:
     return output
 
 
+def _restore_pptx_hyperlinks(src: Path, text: str) -> str:
+    """Restore hyperlinks lost by MarkItDown in pptx conversion.
+
+    python-pptx reads each slide's text frames and finds runs that have
+    a hyperlink address.  The plain text is then replaced with
+    ``[text](url)`` in the Markdown output.
+    """
+    try:
+        from pptx import Presentation  # type: ignore[import-untyped]
+    except ImportError:
+        return text
+
+    prs = Presentation(str(src))
+
+    # Collect all (display_text, url) pairs from the presentation
+    links: list[tuple[str, str]] = []
+    for slide in prs.slides:
+        for shape in slide.shapes:
+            if not shape.has_text_frame:
+                continue
+            for para in shape.text_frame.paragraphs:
+                for run in para.runs:
+                    if run.hyperlink and run.hyperlink.address:
+                        display = run.text.strip()
+                        url = run.hyperlink.address
+                        if display and url:
+                            links.append((display, url))
+
+    if not links:
+        return text
+
+    # Replace plain text with markdown links (longest display text first
+    # to avoid partial matches)
+    for display, url in sorted(links, key=lambda x: len(x[0]), reverse=True):
+        md_link = f"[{display}]({url})"
+        # Only replace if not already a markdown link
+        if md_link in text:
+            continue
+        # Avoid replacing text that is already inside a markdown link
+        if f"[{display}](" in text:
+            continue
+        text = text.replace(display, md_link)
+
+    return text
+
+
+def _add_pptx_slide_separators(text: str) -> str:
+    """Insert horizontal rules (---) between pptx slides.
+
+    MarkItDown outputs ``<!-- Slide number: N -->`` comments.
+    This function adds ``---`` before each slide comment (except the first)
+    to visually separate slides in the Markdown output.
+    """
+    lines = text.split("\n")
+    result: list[str] = []
+    first_slide = True
+    for line in lines:
+        if line.strip().startswith("<!-- Slide number:"):
+            if first_slide:
+                first_slide = False
+            else:
+                # Add separator before this slide (with blank line)
+                if result and result[-1].strip():
+                    result.append("")
+                result.append("---")
+                result.append("")
+        result.append(line)
+    return "\n".join(result)
+
+
+def _correct_xlsx_merged_cells(src: Path, text: str) -> str:
+    """Fix NaN values in xlsx tables caused by merged cells.
+
+    MarkItDown renders merged cells as ``NaN``.  This function reads the
+    workbook with openpyxl to find merged cell ranges and replaces the
+    ``NaN`` placeholders with the actual merged cell value.
+    It also ensures each sheet has an ``## SheetName`` heading.
+    """
+    try:
+        from openpyxl import load_workbook  # type: ignore[import-untyped]
+    except ImportError:
+        return text
+
+    wb = load_workbook(str(src), data_only=True)
+
+    # Build a per-sheet list of rows with merged cell values filled in
+    sheet_tables: dict[str, list[list[str]]] = {}
+    for ws in wb.worksheets:
+        # Build a map of merged cell coordinates to their value
+        merged_values: dict[tuple[int, int], str] = {}
+        for merge_range in ws.merged_cells.ranges:
+            top_left = ws.cell(merge_range.min_row, merge_range.min_col)
+            value = str(top_left.value) if top_left.value is not None else ""
+            for row in range(merge_range.min_row, merge_range.max_row + 1):
+                for col in range(merge_range.min_col, merge_range.max_col + 1):
+                    if (row, col) != (merge_range.min_row, merge_range.min_col):
+                        merged_values[(row, col)] = value
+
+        rows: list[list[str]] = []
+        for row_idx, row in enumerate(ws.iter_rows(values_only=False), start=1):
+            cells: list[str] = []
+            for col_idx, cell in enumerate(row, start=1):
+                if (row_idx, col_idx) in merged_values:
+                    cells.append(merged_values[(row_idx, col_idx)])
+                else:
+                    cells.append(str(cell.value) if cell.value is not None else "")
+            rows.append(cells)
+        sheet_tables[ws.title] = rows
+
+    wb.close()
+
+    if not sheet_tables:
+        return text
+
+    # Replace NaN in the MarkItDown output table cells
+    # Process line-by-line within markdown tables
+    lines = text.split("\n")
+    result: list[str] = []
+
+    # Identify which sheet we are currently in (by ## heading)
+    current_sheet: str | None = None
+    current_sheet_rows: list[list[str]] = []
+    table_row_idx = 0  # tracks data row index (after header separator)
+    in_separator = False
+
+    for line in lines:
+        stripped = line.strip()
+
+        # Detect sheet heading
+        if stripped.startswith("## "):
+            sheet_name = stripped[3:].strip()
+            if sheet_name in sheet_tables:
+                current_sheet = sheet_name
+                current_sheet_rows = sheet_tables[sheet_name]
+                table_row_idx = 0
+                in_separator = False
+
+        # Process table rows
+        if stripped.startswith("|") and stripped.endswith("|") and current_sheet:
+            cells = [c.strip() for c in stripped.split("|")[1:-1]]
+
+            # Check if this is the separator row (| --- | --- |)
+            if all(c.replace("-", "").replace(":", "").strip() == "" for c in cells):
+                in_separator = True
+                result.append(line)
+                continue
+
+            if not in_separator:
+                # This is the header row
+                table_row_idx = 0
+            else:
+                # This is a data row
+                table_row_idx += 1
+
+            # Replace NaN cells with openpyxl values
+            has_nan = any("NaN" in c for c in cells)
+            if has_nan and current_sheet_rows:
+                # Map: header is row 0 in sheet, data rows start at row 1
+                sheet_row_idx = 0 if not in_separator else table_row_idx
+                if sheet_row_idx < len(current_sheet_rows):
+                    sheet_row = current_sheet_rows[sheet_row_idx]
+                    new_cells: list[str] = []
+                    for i, c in enumerate(cells):
+                        if "NaN" in c and i < len(sheet_row):
+                            new_cells.append(sheet_row[i])
+                        else:
+                            new_cells.append(c)
+                    line = "| " + " | ".join(new_cells) + " |"
+
+        result.append(line)
+
+    return "\n".join(result)
+
+
 def _extract_images(src: Path, dest: Path) -> dict[str, str]:
     """Extract embedded images from docx/pptx files.
 
@@ -1183,9 +1359,20 @@ def convert_file(
         result = md.convert(str(src))
         content = result.text_content
 
+        ext = src.suffix.lower()
+
         # Docx heading style correction
-        if src.suffix.lower() == ".docx":
+        if ext == ".docx":
             content = _correct_docx_headings(src, content)
+
+        # Pptx: restore hyperlinks and add slide separators
+        if ext == ".pptx":
+            content = _restore_pptx_hyperlinks(src, content)
+            content = _add_pptx_slide_separators(content)
+
+        # Xlsx: fix merged cell NaN values
+        if ext == ".xlsx":
+            content = _correct_xlsx_merged_cells(src, content)
 
         # Strip base64 images first, then replace placeholders with extracted files
         content = strip_base64_images(content)
@@ -1231,9 +1418,20 @@ def convert_dir(
             result = md.convert(str(f))
             text = result.text_content
 
+            ext = f.suffix.lower()
+
             # Docx heading style correction
-            if f.suffix.lower() == ".docx":
+            if ext == ".docx":
                 text = _correct_docx_headings(f, text)
+
+            # Pptx: restore hyperlinks and add slide separators
+            if ext == ".pptx":
+                text = _restore_pptx_hyperlinks(f, text)
+                text = _add_pptx_slide_separators(text)
+
+            # Xlsx: fix merged cell NaN values
+            if ext == ".xlsx":
+                text = _correct_xlsx_merged_cells(f, text)
 
             # Strip base64 images first, then replace with extracted files
             text = strip_base64_images(text)

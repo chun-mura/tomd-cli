@@ -16,6 +16,9 @@ from tomd.converter import (
     _extract_images,
     _replace_image_placeholders,
     _correct_docx_headings,
+    _restore_pptx_hyperlinks,
+    _add_pptx_slide_separators,
+    _correct_xlsx_merged_cells,
 )
 
 
@@ -432,3 +435,178 @@ class TestCorrectDocxHeadings:
         text = "Just a paragraph."
         result = _correct_docx_headings(docx_path, text)
         assert result == text
+
+
+class TestRestorePptxHyperlinks:
+    def test_restores_link(self, tmp_path):
+        from pptx import Presentation
+        pptx_path = tmp_path / "links.pptx"
+        prs = Presentation()
+        slide = prs.slides.add_slide(prs.slide_layouts[1])
+        slide.shapes.title.text = "Test"
+        tf = slide.placeholders[1].text_frame
+        p = tf.paragraphs[0]
+        p.clear()
+        run = p.add_run()
+        run.text = "Visit Example"
+        run.hyperlink.address = "https://example.com"
+        prs.save(str(pptx_path))
+
+        text = "# Test\nVisit Example"
+        result = _restore_pptx_hyperlinks(pptx_path, text)
+        assert "[Visit Example](https://example.com)" in result
+
+    def test_preserves_existing_links(self, tmp_path):
+        from pptx import Presentation
+        pptx_path = tmp_path / "links.pptx"
+        prs = Presentation()
+        slide = prs.slides.add_slide(prs.slide_layouts[1])
+        slide.shapes.title.text = "Test"
+        tf = slide.placeholders[1].text_frame
+        p = tf.paragraphs[0]
+        p.clear()
+        run = p.add_run()
+        run.text = "Click here"
+        run.hyperlink.address = "https://example.com"
+        prs.save(str(pptx_path))
+
+        # Text already has the link
+        text = "# Test\n[Click here](https://example.com)"
+        result = _restore_pptx_hyperlinks(pptx_path, text)
+        assert result.count("[Click here](https://example.com)") == 1
+
+    def test_no_hyperlinks(self, tmp_path):
+        from pptx import Presentation
+        pptx_path = tmp_path / "plain.pptx"
+        prs = Presentation()
+        slide = prs.slides.add_slide(prs.slide_layouts[1])
+        slide.shapes.title.text = "Title"
+        slide.placeholders[1].text = "No links here"
+        prs.save(str(pptx_path))
+
+        text = "# Title\nNo links here"
+        result = _restore_pptx_hyperlinks(pptx_path, text)
+        assert result == text
+
+
+class TestAddPptxSlideSeparators:
+    def test_adds_separators(self):
+        text = (
+            "<!-- Slide number: 1 -->\n"
+            "# Slide One\n"
+            "Content 1\n"
+            "<!-- Slide number: 2 -->\n"
+            "# Slide Two\n"
+            "Content 2\n"
+            "<!-- Slide number: 3 -->\n"
+            "# Slide Three\n"
+            "Content 3"
+        )
+        result = _add_pptx_slide_separators(text)
+        assert result.count("---") == 2
+        # First slide should NOT have a separator before it
+        lines = result.split("\n")
+        first_slide_idx = next(
+            i for i, l in enumerate(lines)
+            if "Slide number: 1" in l
+        )
+        # No --- before the first slide
+        assert "---" not in "\n".join(lines[:first_slide_idx])
+
+    def test_single_slide(self):
+        text = "<!-- Slide number: 1 -->\n# Only Slide\nContent"
+        result = _add_pptx_slide_separators(text)
+        assert "---" not in result
+
+    def test_no_slide_comments(self):
+        text = "Just regular text\nNo slides here"
+        result = _add_pptx_slide_separators(text)
+        assert result == text
+
+
+class TestCorrectXlsxMergedCells:
+    def test_fixes_nan_from_merged_cells(self, tmp_path):
+        from openpyxl import Workbook
+        xlsx_path = tmp_path / "merged.xlsx"
+        wb = Workbook()
+        ws = wb.active
+        ws.title = "Data"
+        ws.append(["Category", "Value"])
+        ws.append(["Electronics", 100])
+        ws.append(["", 200])
+        ws.merge_cells("A2:A3")
+        ws.append(["Clothing", 50])
+        wb.save(str(xlsx_path))
+
+        # Simulate MarkItDown output with NaN
+        text = (
+            "## Data\n"
+            "| Category | Value |\n"
+            "| --- | --- |\n"
+            "| Electronics | 100 |\n"
+            "| NaN | 200 |\n"
+            "| Clothing | 50 |"
+        )
+        result = _correct_xlsx_merged_cells(xlsx_path, text)
+        assert "NaN" not in result
+        assert "Electronics" in result
+        # The merged cell should show the parent value
+        lines = result.split("\n")
+        row4 = [l for l in lines if "200" in l][0]
+        assert "Electronics" in row4
+
+    def test_no_merged_cells(self, tmp_path):
+        from openpyxl import Workbook
+        xlsx_path = tmp_path / "normal.xlsx"
+        wb = Workbook()
+        ws = wb.active
+        ws.title = "Sheet1"
+        ws.append(["A", "B"])
+        ws.append([1, 2])
+        wb.save(str(xlsx_path))
+
+        text = (
+            "## Sheet1\n"
+            "| A | B |\n"
+            "| --- | --- |\n"
+            "| 1 | 2 |"
+        )
+        result = _correct_xlsx_merged_cells(xlsx_path, text)
+        assert result == text
+
+    def test_multiple_sheets(self, tmp_path):
+        from openpyxl import Workbook
+        xlsx_path = tmp_path / "multi.xlsx"
+        wb = Workbook()
+        ws1 = wb.active
+        ws1.title = "Sheet A"
+        ws1.append(["X", "Y"])
+        ws1.append(["a", "b"])
+        ws1.append(["", "c"])
+        ws1.merge_cells("A2:A3")
+
+        ws2 = wb.create_sheet("Sheet B")
+        ws2.append(["P", "Q"])
+        ws2.append(["p1", "q1"])
+        wb.save(str(xlsx_path))
+
+        text = (
+            "## Sheet A\n"
+            "| X | Y |\n"
+            "| --- | --- |\n"
+            "| a | b |\n"
+            "| NaN | c |\n"
+            "\n"
+            "## Sheet B\n"
+            "| P | Q |\n"
+            "| --- | --- |\n"
+            "| p1 | q1 |"
+        )
+        result = _correct_xlsx_merged_cells(xlsx_path, text)
+        assert "NaN" not in result
+        # Sheet A merged cell should be filled
+        lines = result.split("\n")
+        nan_line = [l for l in lines if "| c |" in l][0]
+        assert "| a | c |" in nan_line
+        # Sheet B should be unchanged
+        assert "| p1 | q1 |" in result
