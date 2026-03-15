@@ -12,6 +12,7 @@ from tomd.converter import (
     _find_table_region,
     _strip_page_headers,
     _apply_headings,
+    _apply_bullets,
 )
 
 
@@ -249,3 +250,39 @@ class TestApplyHeadings:
         text = "Title\nNot a heading\nMore text"
         result = _apply_headings(text, heading_map)
         assert result == "# Title\nNot a heading\nMore text"
+
+
+class TestApplyBullets:
+    def test_exact_match(self):
+        items = {"temperature", "top-k"}
+        text = "temperature\n\nbody text\n\ntop-k"
+        result = _apply_bullets(text, items)
+        assert "- temperature" in result
+        assert "- top-k" in result
+        assert "body text" in result
+        assert "- body" not in result
+
+    def test_startswith_match(self):
+        items = {"temperature"}
+        text = "temperature（温度）\n\nbody text"
+        result = _apply_bullets(text, items)
+        assert "- temperature（温度）" in result
+
+    def test_skips_parameter_values(self):
+        items = {"temperature"}
+        text = "temperature=0.2, top_p=0.9"
+        result = _apply_bullets(text, items)
+        assert not result.startswith("- ")
+
+    def test_skips_headings_and_tables(self):
+        items = {"Section"}
+        text = "## Section\n| Section | col |"
+        result = _apply_bullets(text, items)
+        assert "## Section" in result
+        assert "- ## Section" not in result
+        assert "- | Section" not in result
+
+    def test_no_items(self):
+        text = "Just text"
+        result = _apply_bullets(text, set())
+        assert result == text

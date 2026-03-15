@@ -306,6 +306,91 @@ def _extract_heading_map(pdf_path: str | Path) -> dict[str, int]:
     return heading_map
 
 
+def _extract_bullet_items(pdf_path: str | Path) -> set[str]:
+    """Detect lines that should be bullet list items based on bold font + indent.
+
+    Lines starting with a bold font and indented from the left margin
+    (outside table regions) are treated as bullet items.
+    """
+    bullet_texts: set[str] = set()
+
+    with pdfplumber.open(str(pdf_path)) as pdf:
+        for page in pdf.pages:
+            if not page.chars:
+                continue
+
+            # Determine table bbox to exclude table chars
+            table_bbox: tuple[float, ...] | None = None
+            if page.rects:
+                v_lines, h_lines = _detect_table_lines(page.rects)
+                if len(v_lines) >= 2 and len(h_lines) >= 2:
+                    table_bbox = (
+                        min(v_lines) - 2, min(h_lines) - 2,
+                        max(v_lines) + 2, max(h_lines) + 2,
+                    )
+
+            # Group chars into lines, excluding table region
+            lines_by_top: dict[float, list[dict[str, Any]]] = {}
+            for char in page.chars:
+                if table_bbox:
+                    x0t, y0t, x1t, y1t = table_bbox
+                    if (char["x0"] >= x0t and char["x1"] <= x1t
+                            and char["top"] >= y0t and char["bottom"] <= y1t):
+                        continue
+                key = round(char["top"], 1)
+                lines_by_top.setdefault(key, []).append(char)
+
+            for top in sorted(lines_by_top.keys()):
+                chars = sorted(lines_by_top[top], key=lambda c: c["x0"])
+                if not chars:
+                    continue
+                first = chars[0]
+                font = first.get("fontname", "")
+                is_bold = "Bold" in font or "700" in font
+                x0 = first["x0"]
+
+                # Bold text that's indented (not at left margin ~72)
+                # and not heading-sized — these are bullet items
+                if is_bold and x0 > 80 and round(first["size"], 1) < 15:
+                    text = "".join(c["text"] for c in chars).strip()
+                    if text and len(text) > 2:
+                        bullet_texts.add(text)
+
+    return bullet_texts
+
+
+def _apply_bullets(text: str, bullet_items: set[str]) -> str:
+    """Convert lines matching bullet items to markdown list items."""
+    if not bullet_items:
+        return text
+
+    # Build a set of longer items for startswith matching
+    long_items = {item for item in bullet_items if len(item) > 2}
+
+    lines = text.split("\n")
+    result = []
+    for line in lines:
+        stripped = line.strip()
+        if not stripped or stripped.startswith("#") or stripped.startswith("|"):
+            result.append(line)
+            continue
+        # Exact match
+        if stripped in bullet_items:
+            result.append(f"- {stripped}")
+            continue
+        # Line starts with a bold/bullet item text
+        # Exclude parameter value lines (contain '=')
+        if "=" in stripped and any(c.isdigit() for c in stripped):
+            result.append(line)
+            continue
+        matched = any(stripped.startswith(item) for item in long_items)
+        if matched:
+            result.append(f"- {stripped}")
+        else:
+            result.append(line)
+    return "\n".join(result)
+
+
 def _apply_headings(text: str, heading_map: dict[str, int]) -> str:
     """Apply heading markers to lines that match the heading map."""
     if not heading_map:
@@ -340,7 +425,9 @@ def _convert_pdf_with_tables(src: Path) -> str:
     tables = _extract_pdf_tables(src)
     if not tables:
         heading_map = _extract_heading_map(src)
-        return _apply_headings(_strip_page_headers(markitdown_text), heading_map)
+        bullet_items = _extract_bullet_items(src)
+        output = _apply_headings(_strip_page_headers(markitdown_text), heading_map)
+        return _apply_bullets(output, bullet_items)
 
     # 3. Find table region in MarkItDown output
     cell_texts = _collect_table_cell_texts(tables)
@@ -349,7 +436,9 @@ def _convert_pdf_with_tables(src: Path) -> str:
 
     if table_start is None or table_end is None:
         heading_map = _extract_heading_map(src)
-        return _apply_headings(_strip_page_headers(markitdown_text), heading_map)
+        bullet_items = _extract_bullet_items(src)
+        output = _apply_headings(_strip_page_headers(markitdown_text), heading_map)
+        return _apply_bullets(output, bullet_items)
 
     # 4. Build output: before-table + tables + after-table
     before_table = "\n".join(markitdown_lines[:table_start]).strip()
@@ -366,9 +455,11 @@ def _convert_pdf_with_tables(src: Path) -> str:
 
     output = _strip_page_headers("\n\n".join(parts))
 
-    # 5. Apply heading markers based on font sizes
+    # 5. Apply heading markers and bullet lists based on font analysis
     heading_map = _extract_heading_map(src)
-    return _apply_headings(output, heading_map)
+    bullet_items = _extract_bullet_items(src)
+    output = _apply_headings(output, heading_map)
+    return _apply_bullets(output, bullet_items)
 
 
 def convert_file(
