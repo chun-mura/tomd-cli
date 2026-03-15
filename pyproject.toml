@@ -38,6 +38,7 @@ tomd = "tomd.cli:main"
 Homepage = "https://github.com/nakamurakohki/tomd-cli"
 Repository = "https://github.com/nakamurakohki/tomd-cli"
 Issues = "https://github.com/nakamurakohki/tomd-cli/issues"
+PyPI = "https://pypi.org/project/tomd-cli/"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/tomd"]
