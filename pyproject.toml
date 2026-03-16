@@ -10,7 +10,7 @@ readme = "README.md"
 license = "MIT"
 requires-python = ">=3.10"
 authors = [
-    { name = "Kohki Nakamura" },
+    { name = "chun-mura" },
 ]
 keywords = ["markdown", "docx", "pptx", "xlsx", "pdf", "converter"]
 classifiers = [
